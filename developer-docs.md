@@ -27,16 +27,18 @@ const data = await res.json();
 const id = data.conversion_id;
 ```
 
-### Convert (queue)
+### Convert
 ```js
-await fetch(`${base}/convert`, {
+const convertRes = await fetch(`${base}/convert`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', 'X-API-Key': 'free_123' },
   body: JSON.stringify({ conversion_id: id, quality: '320', start_time: '', end_time: '' })
 });
+const convertData = await convertRes.json();
+// convertData.status: 'preparing' (fast path may be 'completed' if variant exists)
 ```
 
-### Status (progress + queue)
+### Status (simplified top-level + detailed flow)
 ```js
 const s = await fetch(`${base}/status/${id}`).then(r => r.json());
 // s.status: 'preparing' | 'completed' | 'failed'
@@ -64,9 +66,10 @@ if (s.status === 'completed' && s.download_url) {
 
 ## Progress UI tips
 - Show metadata immediately after /prepare (title/thumbnail/duration).
-- While queued: show queue_position and spinner.
-- During download/conversion: show progress bars from /status.
-- On completion: enable a Download button.
+- Render a stepper from `s.flow` (use `done`/`current`).
+- Show a single message from `s.status_text` (no queue position UI).
+- When `s.status === 'completed'`, enable the Download button.
+- If `s.status === 'failed'`, show `s.error` and allow retry.
 
 ## Error handling
 - If /convert returns 202 but the job later fails, /status will show `status=failed` and may set `error`.
