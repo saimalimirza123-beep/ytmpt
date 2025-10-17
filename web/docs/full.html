@@ -51,12 +51,11 @@
   }</pre>
 
   <h3>GET /status/{conversion_id}</h3>
-  <p>Poll to track download and conversion progress.</p>
+  <p>Poll to track dynamic status (no percentages).</p>
   <pre>{
   "conversion_id": "conv_12345",
-  "status": "completed|preparing|downloading|converting|failed|queued_for_conversion",
-  "download_progress": 85,
-  "conversion_progress": 100,
+  "status": "preparing|downloading|converting|completed|failed|queued_for_conversion",
+  "status_text": "Downloading audio…",
   "download_url": "/download/conv_12345.mp3",
   "queue_position": 2,
   "error": ""
@@ -114,10 +113,11 @@ ADMIN_PASS=password
 OEMBED_ENDPOINT=https://www.youtube.com/oembed
 DURATION_API_ENDPOINT=https://ds2.ezsrv.net/api/getDuration
 MAX_CONCURRENT_DOWNLOADS=20
-MAX_CONCURRENT_CONVERSIONS=20</pre>
+MAX_CONCURRENT_CONVERSIONS=20
+MAX_VIDEO_DURATION_SECONDS=2400</pre>
 
   <h2>Quality options</h2>
-  <pre>128, 192, 256, 320</pre>
+  <pre>64, 128, 192, 256, 320</pre>
 
   <h2>Flow</h2>
   <ol>
@@ -133,6 +133,8 @@ MAX_CONCURRENT_CONVERSIONS=20</pre>
     <li>Dedup prevents duplicate sessions for same URL (memory/Redis).</li>
     <li>Cleanup removes old files after TTLs.</li>
     <li>If conversion queued before download complete, it auto-requeues until ready.</li>
+    <li>No clip-length cap: <code>start_time</code>/<code>end_time</code> are validated for format and within video bounds only.</li>
+    <li>Videos longer than <code>MAX_VIDEO_DURATION_SECONDS</code> are rejected with a clear error like "video too long: max 40m allowed, got 1h12m".</li>
   </ul>
 </body>
 </html>

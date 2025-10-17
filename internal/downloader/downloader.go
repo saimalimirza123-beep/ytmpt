@@ -13,7 +13,6 @@ import (
     "regexp"
     "strconv"
     "strings"
-    "sync/atomic"
     "time"
 )
 
@@ -237,21 +236,9 @@ func (d *Downloader) Download(ctx context.Context, url, outputPath string, onPro
 			return err
 		}
         // Ensure monotonic progress across both stdout/stderr streams
-        var lastSent int32 = -1
-        monotonicCB := func(p int) {
-            for {
-                prev := atomic.LoadInt32(&lastSent)
-                if int32(p) <= prev {
-                    return
-                }
-                if atomic.CompareAndSwapInt32(&lastSent, prev, int32(p)) {
-                    onProgress(p)
-                    return
-                }
-            }
-        }
-        go readProgress(stderr, monotonicCB)
-        go readProgress(stdout, monotonicCB)
+        // Progress disabled at API level; still drain outputs to avoid blocking
+        go readProgress(stderr, func(int){})
+        go readProgress(stdout, func(int){})
 		return cmd.Wait()
 	})
 }

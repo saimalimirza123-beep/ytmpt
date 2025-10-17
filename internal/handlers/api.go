@@ -183,26 +183,43 @@ func (a *API) handlePrepare(w http.ResponseWriter, r *http.Request) {
         writeErr(w, http.StatusBadRequest, "unsupported url domain")
         return
     }
-	// Always create a new session; dedupe at asset/variant layer instead of reusing sessions
-	id := newID()
-	s := &models.ConversionSession{ID: id, URL: req.URL, State: models.StatePreparing}
-	if err := a.sessions.CreateSession(r.Context(), s); err != nil {
-		writeErr(w, http.StatusInternalServerError, "failed to create session")
-		return
-	}
-	_ = a.sessions.SetURLMap(r.Context(), req.URL, id)
+    // Fetch metadata first to validate duration against configured limit
+    title, thumb, dur, _ := a.dl.FetchMetadata(r.Context(), req.URL)
+    if a.cfg.MaxVideoDurationSeconds > 0 && dur > a.cfg.MaxVideoDurationSeconds {
+        maxStr := humanDuration(a.cfg.MaxVideoDurationSeconds)
+        gotStr := humanDuration(dur)
+        writeErr(w, http.StatusBadRequest, "video too long: max "+maxStr+" allowed, got "+gotStr)
+        return
+    }
+    // Create a new session; dedupe at asset/variant layer instead of reusing sessions
+    id := newID()
+    s := &models.ConversionSession{ID: id, URL: req.URL, State: models.StatePreparing}
+    if err := a.sessions.CreateSession(r.Context(), s); err != nil {
+        writeErr(w, http.StatusInternalServerError, "failed to create session")
+        return
+    }
+    _ = a.sessions.SetURLMap(r.Context(), req.URL, id)
 
-	// fetch metadata fast using yt-dlp --dump-json (fallback design)
-	title, thumb, dur, _ := a.dl.FetchMetadata(r.Context(), req.URL)
-	s.Meta = models.MetaLite{Title: title, Thumbnail: thumb, Duration: dur}
-	s.State = models.StateCreated
-	_ = a.sessions.UpdateSession(r.Context(), s)
+    // Populate metadata and mark session as created
+    s.Meta = models.MetaLite{Title: title, Thumbnail: thumb, Duration: dur}
+    s.State = models.StateCreated
+    _ = a.sessions.UpdateSession(r.Context(), s)
 
-	// enqueue background download
+	// enqueue background download if needed; verify cached asset isn't stale
 	assetHash := util.HashString(util.CanonicalVideoID(req.URL))
 	s.AssetHash = assetHash
 	_ = a.sessions.UpdateSession(r.Context(), s)
-	if _, state, ok, _ := a.sessions.GetAsset(r.Context(), assetHash); !ok || state == "" || state == string(models.StateFailed) {
+	src, state, ok, _ := a.sessions.GetAsset(r.Context(), assetHash)
+	stale := false
+	if ok && src != "" && state == string(models.StateDownloaded) {
+		if fi, err := os.Stat(src); err != nil || fi.Size() == 0 {
+			stale = true
+		}
+	}
+	if !ok || state == "" || state == string(models.StateFailed) || stale {
+		if stale {
+			_ = a.sessions.SetAsset(r.Context(), assetHash, "", "expired")
+		}
 		_ = a.sessions.SetAsset(r.Context(), assetHash, "", string(models.StatePreparing))
 		job := queue.Job{ID: newID(), Type: queue.JobDownload, SessionID: id, EnqueuedAt: time.Now(), Priority: 10}
 		if !a.dlQueue.Enqueue(job) {
@@ -225,12 +242,19 @@ func (a *API) handleConvertReq(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "session not found")
 		return
 	}
-    // Validation: sanity check start/end and max clip length
+    // Validation: sanity check start/end against total duration; no clip-length cap
     // Try using known video duration from metadata if present
     total := s.Meta.Duration
+    // Enforce maximum source video duration if configured and known
+    if a.cfg.MaxVideoDurationSeconds > 0 && total > a.cfg.MaxVideoDurationSeconds {
+        maxStr := humanDuration(a.cfg.MaxVideoDurationSeconds)
+        gotStr := humanDuration(total)
+        writeErr(w, http.StatusBadRequest, "video too long: max "+maxStr+" allowed, got "+gotStr)
+        return
+    }
     if total < 0 { total = 0 }
-    if _, _, ok := util.ParseClipBounds(req.StartTime, req.EndTime, a.cfg.MaxClipSeconds, total); !ok {
-        writeErr(w, http.StatusBadRequest, "invalid start/end or clip too long")
+    if _, _, ok := util.ParseClipBounds(req.StartTime, req.EndTime, 0, total); !ok {
+        writeErr(w, http.StatusBadRequest, "invalid start/end")
         return
     }
 	// Always accept and enqueue conversion asynchronously. If source not ready,
@@ -239,26 +263,53 @@ func (a *API) handleConvertReq(w http.ResponseWriter, r *http.Request) {
 	s.AssetHash = util.HashString(util.CanonicalVideoID(s.URL))
 	s.VariantHash = util.HashString(s.AssetHash + "|" + string(req.Quality) + "|" + req.StartTime + "|" + req.EndTime)
 	_ = a.sessions.UpdateSession(r.Context(), s)
-	// Fast-complete if variant already exists
+	// Fast-complete if variant already exists AND file is present
 	if out, ok, _ := a.sessions.GetVariant(r.Context(), s.VariantHash); ok && out != "" {
-		s.OutputPath = out
-		s.State = models.StateCompleted
-		s.DownloadProgress = 100
-		s.ConversionProgress = 100
+		if fi, err := os.Stat(out); err == nil && fi.Size() > 0 {
+			s.OutputPath = out
+			s.State = models.StateCompleted
+            // progress fields removed
+			_ = a.sessions.UpdateSession(r.Context(), s)
+			writeJSON(w, http.StatusAccepted, models.ConvertAcceptedResponse{ConversionID: s.ID, Status: string(s.State), QueuePosition: 0, Message: "Reused existing converted output."})
+			return
+		}
+		// stale mapping: clear and proceed to enqueue conversion
+		_ = a.sessions.SetVariant(r.Context(), s.VariantHash, "")
+		s.OutputPath = ""
 		_ = a.sessions.UpdateSession(r.Context(), s)
-		writeJSON(w, http.StatusAccepted, models.ConvertAcceptedResponse{ConversionID: s.ID, Status: string(s.State), QueuePosition: 0, Message: "Reused existing converted output."})
-		return
 	}
-    // Determine if source is already ready to avoid unnecessary 'queued' bounce
-    sourceReady := false
+	// Determine if source is already ready to avoid unnecessary 'queued' bounce
+	sourceReady := false
     if s.SourcePath != "" {
-        sourceReady = true
-    } else {
-        if src, state, ok, _ := a.sessions.GetAsset(r.Context(), s.AssetHash); ok && src != "" && state == string(models.StateDownloaded) {
-            s.SourcePath = src
+        if fi, err := os.Stat(s.SourcePath); err == nil && fi.Size() > 0 {
             sourceReady = true
+        } else {
+            _ = a.sessions.SetAsset(r.Context(), s.AssetHash, "", "expired")
+            s.SourcePath = ""
         }
     }
+	if !sourceReady {
+		if src2, state2, ok2, _ := a.sessions.GetAsset(r.Context(), s.AssetHash); ok2 && src2 != "" && state2 == string(models.StateDownloaded) {
+			if fi, err := os.Stat(src2); err == nil && fi.Size() > 0 {
+				s.SourcePath = src2
+				sourceReady = true
+			} else {
+				_ = a.sessions.SetAsset(r.Context(), s.AssetHash, "", "expired")
+			}
+		}
+	}
+	// If source not ready, ensure a fresh download job is enqueued
+	if !sourceReady {
+		_, astate, ok3, _ := a.sessions.GetAsset(r.Context(), s.AssetHash)
+		if !ok3 || astate == "" || astate == string(models.StateFailed) || astate == "expired" {
+			_ = a.sessions.SetAsset(r.Context(), s.AssetHash, "", string(models.StatePreparing))
+			job := queue.Job{ID: newID(), Type: queue.JobDownload, SessionID: s.ID, EnqueuedAt: time.Now(), Priority: 10}
+			if !a.dlQueue.Enqueue(job) {
+				writeErr(w, http.StatusServiceUnavailable, "queue full")
+				return
+			}
+		}
+	}
 
     // Map API key to job priority (simple heuristic: premium > default)
 	apiKey := r.Header.Get("X-API-Key")
@@ -304,12 +355,23 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
-	downloadURL := ""
+    // If session points to an output that has expired, reflect accurate status
+    if s.State == models.StateCompleted && s.OutputPath != "" {
+        if fi, err := os.Stat(s.OutputPath); err != nil || fi.Size() == 0 {
+            s.OutputPath = ""
+            s.State = models.StateFailed
+            s.Error = "output expired; please request conversion again"
+            _ = a.sessions.UpdateSession(r.Context(), s)
+        }
+    }
+    downloadURL := ""
 	if s.State == models.StateCompleted && s.OutputPath != "" {
 		// Prefer stable session-based download URL
 		downloadURL = "/download/" + s.ID + ".mp3"
 	}
-	resp := models.StatusResponse{ConversionID: s.ID, Status: string(s.State), DownloadProgress: s.DownloadProgress, ConversionProgress: s.ConversionProgress, DownloadURL: downloadURL}
+    // Build friendly status text for UI engagement
+    friendly := a.friendlyStatusText(s)
+    resp := models.StatusResponse{ConversionID: s.ID, Status: string(s.State), DownloadURL: downloadURL, StatusText: friendly}
 	if s.State == models.StateQueued {
 		resp.QueuePosition = a.cvQueue.PositionForSession(queue.JobConvert, s.ID)
 	}
@@ -348,10 +410,7 @@ func (a *API) handleDownload(job queue.Job) {
 		s.AssetHash = util.HashString(util.CanonicalVideoID(s.URL))
 	}
 	out := filepath.Join(a.cfg.ConversionsDir, "streams", s.AssetHash+".source")
-	err = a.dl.Download(ctx, s.URL, out, func(p int) {
-		s.DownloadProgress = p
-		_ = a.sessions.UpdateSession(ctx, s)
-	})
+    err = a.dl.Download(ctx, s.URL, out, func(p int) {})
     if err != nil {
         job.Attempts++
         if job.Attempts < a.cfg.MaxJobRetries {
@@ -373,8 +432,7 @@ func (a *API) handleDownload(job queue.Job) {
     a.metrics.SuccessCount.Add(1)
     a.metrics.ObserveDuration(time.Since(start).Seconds(), false)
 	s.SourcePath = out
-	s.State = models.StateDownloaded
-	s.DownloadProgress = 100
+    s.State = models.StateDownloaded
 	_ = a.sessions.UpdateSession(ctx, s)
 	_ = a.sessions.SetAsset(ctx, s.AssetHash, out, string(models.StateDownloaded))
 }
@@ -396,7 +454,7 @@ func (a *API) handleConvert(job queue.Job) {
         if src, state, ok, _ := a.sessions.GetAsset(ctx, s.AssetHash); ok && src != "" && state == string(models.StateDownloaded) {
             s.SourcePath = src
             s.State = models.StateDownloaded
-            s.DownloadProgress = 100
+            // progress fields removed
             _ = a.sessions.UpdateSession(ctx, s)
         }
     }
@@ -419,10 +477,7 @@ func (a *API) handleConvert(job queue.Job) {
 	}
 	out := filepath.Join(a.cfg.ConversionsDir, "outputs", s.VariantHash+".mp3")
 	dur := s.Meta.Duration
-    err = a.conv.Convert(ctx, s.SourcePath, out, job.Quality, job.StartTime, job.EndTime, dur, func(p int) {
-		s.ConversionProgress = p
-		_ = a.sessions.UpdateSession(ctx, s)
-	})
+    err = a.conv.Convert(ctx, s.SourcePath, out, job.Quality, job.StartTime, job.EndTime, dur, func(p int) {})
 	if err != nil {
         job.Attempts++
         if job.Attempts < a.cfg.MaxJobRetries {
@@ -443,9 +498,8 @@ func (a *API) handleConvert(job queue.Job) {
 	}
     a.metrics.SuccessCount.Add(1)
     a.metrics.ObserveDuration(time.Since(start).Seconds(), true)
-	s.OutputPath = out
-	s.ConversionProgress = 100
-	s.State = models.StateCompleted
+    s.OutputPath = out
+    s.State = models.StateCompleted
 	_ = a.sessions.UpdateSession(ctx, s)
 	_ = a.sessions.SetVariant(ctx, s.VariantHash, out)
 }
@@ -524,6 +578,37 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// friendlyStatusText maps internal states to user-friendly dynamic messages.
+func (a *API) friendlyStatusText(s *models.ConversionSession) string {
+    switch s.State {
+    case models.StatePreparing, models.StateCreated:
+        return "Analyzing video…"
+    case models.StateDownloading:
+        return "Downloading audio…"
+    case models.StateDownloaded:
+        return "Audio ready. Starting conversion…"
+    case models.StateQueued:
+        if s.ID != "" {
+            pos := a.cvQueue.PositionForSession(queue.JobConvert, s.ID)
+            if pos > 0 {
+                return fmt.Sprintf("Queued for conversion (position %d)…", pos)
+            }
+        }
+        return "Queued for conversion…"
+    case models.StateConverting:
+        return "Converting to MP3…"
+    case models.StateCompleted:
+        return "Ready to download!"
+    case models.StateFailed:
+        if s.Error != "" {
+            return "Failed: " + s.Error
+        }
+        return "Failed"
+    default:
+        return "Working…"
+    }
+}
+
 func (a *API) handleSelfTest(w http.ResponseWriter, r *http.Request) {
     // Check presence of external tools
     type toolInfo struct{ Name, Version, Error string }
@@ -553,6 +638,29 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// humanDuration turns seconds into a compact human-friendly string like "3m45s" or "1h02m".
+func humanDuration(seconds int) string {
+    if seconds <= 0 {
+        return "0s"
+    }
+    h := seconds / 3600
+    m := (seconds % 3600) / 60
+    s := seconds % 60
+    if h > 0 {
+        if s == 0 {
+            return fmt.Sprintf("%dh%02dm", h, m)
+        }
+        return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
+    }
+    if m > 0 {
+        if s == 0 {
+            return fmt.Sprintf("%dm", m)
+        }
+        return fmt.Sprintf("%dm%02ds", m, s)
+    }
+    return fmt.Sprintf("%ds", s)
 }
 
 func safeFilename(s string) string {
