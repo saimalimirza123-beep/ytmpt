@@ -487,7 +487,11 @@ func (a *API) handleDownload(job queue.Job) {
             }(job)
         } else {
             s.State = models.StateFailed
-            s.Error = err.Error()
+            if strings.Contains(err.Error(), "signal: aborted") {
+                s.Error = "download aborted by tool; retry later"
+            } else {
+                s.Error = err.Error()
+            }
             _ = a.sessions.UpdateSession(ctx, s)
             _ = a.sessions.SetAsset(ctx, s.AssetHash, "", string(models.StateFailed))
             a.metrics.ErrorCount.Add(1)
@@ -517,14 +521,25 @@ func (a *API) handleConvert(job queue.Job) {
     }
     if s.SourcePath == "" {
         if src, state, ok, _ := a.sessions.GetAsset(ctx, s.AssetHash); ok && src != "" && state == string(models.StateDownloaded) {
-            s.SourcePath = src
-            s.State = models.StateDownloaded
-            // progress fields removed
-            _ = a.sessions.UpdateSession(ctx, s)
+            // Verify file still exists and is non-empty before using it
+            if fi, err := os.Stat(src); err == nil && fi.Size() > 0 {
+                s.SourcePath = src
+                s.State = models.StateDownloaded
+                _ = a.sessions.UpdateSession(ctx, s)
+            } else {
+                // Stale mapping: mark expired to trigger fresh download
+                _ = a.sessions.SetAsset(ctx, s.AssetHash, "", "expired")
+            }
         }
     }
-	// Wait until download finishes; if not ready, re-enqueue shortly
-	if s.SourcePath == "" || s.State == models.StateDownloading || s.State == models.StatePreparing || s.State == models.StateCreated {
+    // Validate source exists; if missing or not ready, re-enqueue and ensure download job
+    if s.SourcePath == "" || s.State == models.StateDownloading || s.State == models.StatePreparing || s.State == models.StateCreated {
+        // If no valid source, enqueue a fresh download job
+        if s.SourcePath == "" {
+            _ = a.sessions.SetAsset(ctx, s.AssetHash, "", string(models.StatePreparing))
+            dj := queue.Job{ID: newID(), Type: queue.JobDownload, SessionID: s.ID, EnqueuedAt: time.Now(), Priority: 10}
+            a.dlQueue.Enqueue(dj)
+        }
 		go func(j queue.Job) {
 			// Re-enqueue without mutating the session to avoid overwriting newer fields
 			time.Sleep(5 * time.Second)
@@ -532,6 +547,17 @@ func (a *API) handleConvert(job queue.Job) {
 		}(job)
 		return
 	}
+    // Final guard: ensure source file still exists just before invoking ffmpeg
+    if fi, err := os.Stat(s.SourcePath); err != nil || fi.Size() == 0 {
+        _ = a.sessions.SetAsset(ctx, s.AssetHash, "", "expired")
+        s.SourcePath = ""
+        _ = a.sessions.UpdateSession(ctx, s)
+        go func(j queue.Job) {
+            time.Sleep(2 * time.Second)
+            a.cvQueue.Enqueue(j)
+        }(job)
+        return
+    }
 	s.State = models.StateConverting
 	_ = a.sessions.UpdateSession(ctx, s)
 	if s.AssetHash == "" {
@@ -555,7 +581,12 @@ func (a *API) handleConvert(job queue.Job) {
             }(job)
         } else {
             s.State = models.StateFailed
-            s.Error = err.Error()
+            // Normalize cryptic abort signals into actionable message
+            if strings.Contains(err.Error(), "signal: aborted") {
+                s.Error = "conversion aborted by encoder; source may be stale or environment under load"
+            } else {
+                s.Error = err.Error()
+            }
             _ = a.sessions.UpdateSession(ctx, s)
             a.metrics.ErrorCount.Add(1)
         }

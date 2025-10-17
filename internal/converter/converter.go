@@ -1,14 +1,15 @@
 package converter
 
 import (
-	"bufio"
-	"context"
-	"fmt"
-	"io"
-	"os/exec"
-	"strconv"
-	"strings"
-	"time"
+    "bufio"
+    "bytes"
+    "context"
+    "fmt"
+    "io"
+    "os/exec"
+    "strconv"
+    "strings"
+    "time"
 )
 
 type ProgressFunc func(pct int)
@@ -50,14 +51,16 @@ func (c *Converter) Convert(ctx context.Context, inputPath, outputPath string, q
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
-		args := []string{"-y"}
+        args := []string{"-y", "-nostdin"}
 		if start != "" {
 			args = append(args, "-ss", start)
 		}
 		if end != "" {
 			args = append(args, "-to", end)
 		}
-		args = append(args, "-i", inputPath, "-vn", "-acodec", "libmp3lame")
+        // Be lenient with slightly corrupted inputs
+        args = append(args, "-fflags", "+discardcorrupt")
+        args = append(args, "-i", inputPath, "-vn", "-acodec", "libmp3lame")
 		if c.cfg.Mode == ModeCBR {
 			// quality is expected like 128/192/320; append 'k'
 			br := c.cfg.CBRBitrate
@@ -79,14 +82,15 @@ func (c *Converter) Convert(ctx context.Context, inputPath, outputPath string, q
 		if err != nil {
 			return err
 		}
-		stderr, err := cmd.StderrPipe()
+        stderr, err := cmd.StderrPipe()
 		if err != nil {
 			return err
 		}
 		if err := cmd.Start(); err != nil {
 			return err
 		}
-		go func() { io.Copy(io.Discard, stderr) }()
+        var errBuf bytes.Buffer
+        go func() { io.Copy(&errBuf, stderr) }()
 		scanner := bufio.NewScanner(stdout)
 		var lastPct int
 		for scanner.Scan() {
@@ -109,6 +113,26 @@ func (c *Converter) Convert(ctx context.Context, inputPath, outputPath string, q
 				}
 			}
 		}
-		return cmd.Wait()
+        if err := cmd.Wait(); err != nil {
+            // surface helpful stderr context with the error
+            tail := tailLines(errBuf.String(), 6)
+            if tail != "" {
+                return fmt.Errorf("%w: %s", err, tail)
+            }
+            return err
+        }
+        return nil
 	})
+}
+
+// tailLines returns the last up to n lines from s.
+func tailLines(s string, n int) string {
+    if n <= 0 || s == "" {
+        return ""
+    }
+    lines := strings.Split(s, "\n")
+    if len(lines) <= n {
+        return strings.TrimSpace(s)
+    }
+    return strings.TrimSpace(strings.Join(lines[len(lines)-n:], "\n"))
 }
