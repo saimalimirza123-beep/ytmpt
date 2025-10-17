@@ -77,7 +77,7 @@ type ConvertResponse struct {
 type ConvertAcceptedResponse struct {
 	ConversionID  string `json:"conversion_id"`
 	Status        string `json:"status"`
-	QueuePosition int    `json:"queue_position"`
+    QueuePosition int    `json:"queue_position,omitempty"`
 	Message       string `json:"message"`
 }
 
@@ -88,4 +88,13 @@ type StatusResponse struct {
 	QueuePosition      int    `json:"queue_position,omitempty"`
 	Error              string `json:"error,omitempty"`
     StatusText         string `json:"status_text,omitempty"`
+    Flow               []FlowStep `json:"flow,omitempty"`
+}
+
+// FlowStep represents a single step in the user-visible flow.
+// Name follows the external names requested by product/UX.
+type FlowStep struct {
+    Name    string `json:"name"`
+    Done    bool   `json:"done"`
+    Current bool   `json:"current,omitempty"`
 }

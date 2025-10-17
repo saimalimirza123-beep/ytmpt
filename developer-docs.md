@@ -9,6 +9,10 @@ This API converts YouTube to MP3 using a two-step, asynchronous flow.
 4. Poll GET /status/{conversion_id} every 2–5s.
 5. When `status=completed`, use `download_url` to download.
 
+Note: The status endpoint intentionally reports a simplified flow to improve UX:
+- While work is ongoing (preparing/downloading/queued/converting), clients will see `status="preparing"` with a friendly `status_text` like "Preparing your audio…".
+- Only terminal states surface as-is: `completed` or `failed`.
+
 ## Example calls
 
 ### Prepare
@@ -23,20 +27,34 @@ const data = await res.json();
 const id = data.conversion_id;
 ```
 
-### Convert (queue)
+### Convert
 ```js
-await fetch(`${base}/convert`, {
+const convertRes = await fetch(`${base}/convert`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', 'X-API-Key': 'free_123' },
   body: JSON.stringify({ conversion_id: id, quality: '320', start_time: '', end_time: '' })
 });
+const convertData = await convertRes.json();
+// convertData.status: 'preparing' (fast path may be 'completed' if variant exists)
 ```
 
-### Status (progress + queue)
+### Status (simplified top-level + detailed flow)
 ```js
 const s = await fetch(`${base}/status/${id}`).then(r => r.json());
-// s.status: 'queued_for_conversion' | 'downloading' | 'converting' | 'completed' | 'failed'
-// s.download_progress, s.conversion_progress, s.queue_position
+// s.status: 'preparing' | 'completed' | 'failed'
+// s.flow: ordered steps with done/current flags
+// Example s.flow names:
+// [
+//   { name: 'preparing', done: true },
+//   { name: 'fetching_metadata', done: true },
+//   { name: 'created', done: true },
+//   { name: 'downloading', done: true },
+//   { name: 'downloaded', done: true },
+//   { name: 'Prossccing', current: true },
+//   { name: 'converting' },
+//   { name: 'completed' },
+//   { name: 'failed' }
+// ]
 ```
 
 ### Download
@@ -48,9 +66,10 @@ if (s.status === 'completed' && s.download_url) {
 
 ## Progress UI tips
 - Show metadata immediately after /prepare (title/thumbnail/duration).
-- While queued: show queue_position and spinner.
-- During download/conversion: show progress bars from /status.
-- On completion: enable a Download button.
+- Render a stepper from `s.flow` (use `done`/`current`).
+- Show a single message from `s.status_text` (no queue position UI).
+- When `s.status === 'completed'`, enable the Download button.
+- If `s.status === 'failed'`, show `s.error` and allow retry.
 
 ## Error handling
 - If /convert returns 202 but the job later fails, /status will show `status=failed` and may set `error`.

@@ -26,6 +26,7 @@ import (
 	"ytmp3api/internal/store"
 	"ytmp3api/internal/util"
     "os/exec"
+    "sync/atomic"
 )
 
 type API struct {
@@ -330,22 +331,16 @@ func (a *API) handleConvertReq(w http.ResponseWriter, r *http.Request) {
         s.State = models.StateQueued
     }
     _ = a.sessions.UpdateSession(r.Context(), s)
-	// Report position in the convert queue and current download state
-	position := a.cvQueue.PositionForSession(queue.JobConvert, s.ID)
-    msg := "Conversion request accepted."
-    if sourceReady {
-        msg += " Starting conversion shortly."
-    } else {
-        msg += " Waiting for download to finish."
-    }
-    // Report more accurate status in response to reduce UI flicker
-    respStatus := string(s.State)
+    // Externalize as 'preparing' to avoid exposing queue/converting states
+    respStatus := string(models.StatePreparing)
+    msg := "Request accepted. Preparing your audio…"
+    // Hide queue position entirely by omitting (omitempty with zero)
     writeJSON(w, http.StatusAccepted, models.ConvertAcceptedResponse{
-		ConversionID:  s.ID,
+        ConversionID:  s.ID,
         Status:        respStatus,
-		QueuePosition: position,
-		Message:       msg,
-	})
+        QueuePosition: 0,
+        Message:       msg,
+    })
 }
 
 func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -369,16 +364,87 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// Prefer stable session-based download URL
 		downloadURL = "/download/" + s.ID + ".mp3"
 	}
-    // Build friendly status text for UI engagement
+    // Build dynamic flow array reflecting progress
+    flow := a.buildFlow(s)
+    // External status: keep simplified unless terminal
+    extStatus := string(models.StatePreparing)
+    switch s.State {
+    case models.StateCompleted:
+        extStatus = string(models.StateCompleted)
+    case models.StateFailed:
+        extStatus = string(models.StateFailed)
+    default:
+        extStatus = string(models.StatePreparing)
+    }
+    // Friendly text
     friendly := a.friendlyStatusText(s)
-    resp := models.StatusResponse{ConversionID: s.ID, Status: string(s.State), DownloadURL: downloadURL, StatusText: friendly}
-	if s.State == models.StateQueued {
-		resp.QueuePosition = a.cvQueue.PositionForSession(queue.JobConvert, s.ID)
-	}
+    resp := models.StatusResponse{ConversionID: s.ID, Status: extStatus, DownloadURL: downloadURL, StatusText: friendly, Flow: flow}
 	if s.Error != "" {
 		resp.Error = s.Error
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// buildFlow constructs the requested dynamic flow list in order:
+// preparing → fetching_metadata → created → downloading → downloaded → Prossccing → converting → completed → failed
+func (a *API) buildFlow(s *models.ConversionSession) []models.FlowStep {
+    steps := []string{"preparing", "fetching_metadata", "created", "downloading", "downloaded", "Prossccing", "converting", "completed", "failed"}
+    // Determine current index based on internal state mapping
+    currentName := "preparing"
+    switch s.State {
+    case models.StatePreparing:
+        currentName = "preparing"
+    case models.StateFetching:
+        currentName = "fetching_metadata"
+    case models.StateCreated:
+        currentName = "created"
+    case models.StateDownloading:
+        currentName = "downloading"
+    case models.StateDownloaded:
+        // Between downloaded and converting, treat as Prossccing
+        currentName = "Prossccing"
+    case models.StateQueued:
+        // Hide queue by surfacing as Prossccing
+        currentName = "Prossccing"
+    case models.StateConverting:
+        currentName = "converting"
+    case models.StateCompleted:
+        currentName = "completed"
+    case models.StateFailed:
+        currentName = "failed"
+    default:
+        currentName = "preparing"
+    }
+    // Mark done/current flags
+    flow := make([]models.FlowStep, 0, len(steps))
+    reachedCurrent := false
+    for _, name := range steps {
+        step := models.FlowStep{Name: name}
+        if !reachedCurrent {
+            if name == currentName {
+                step.Done = false
+                step.Current = true
+                reachedCurrent = true
+            } else {
+                // mark preceding steps as done
+                step.Done = true
+            }
+        }
+        flow = append(flow, step)
+    }
+    // If terminal, mark all up to and including terminal as done and current=false
+    if currentName == "completed" || currentName == "failed" {
+        for i := range flow {
+            flow[i].Current = false
+            if flow[i].Name == currentName {
+                flow[i].Done = true
+                // steps after terminal remain not done
+                break
+            }
+            flow[i].Done = true
+        }
+    }
+    return flow
 }
 
 func (a *API) handleDelete(w http.ResponseWriter, r *http.Request) {
@@ -422,7 +488,11 @@ func (a *API) handleDownload(job queue.Job) {
             }(job)
         } else {
             s.State = models.StateFailed
-            s.Error = err.Error()
+            if strings.Contains(err.Error(), "signal: aborted") {
+                s.Error = "download aborted by tool; retry later"
+            } else {
+                s.Error = err.Error()
+            }
             _ = a.sessions.UpdateSession(ctx, s)
             _ = a.sessions.SetAsset(ctx, s.AssetHash, "", string(models.StateFailed))
             a.metrics.ErrorCount.Add(1)
@@ -452,14 +522,25 @@ func (a *API) handleConvert(job queue.Job) {
     }
     if s.SourcePath == "" {
         if src, state, ok, _ := a.sessions.GetAsset(ctx, s.AssetHash); ok && src != "" && state == string(models.StateDownloaded) {
-            s.SourcePath = src
-            s.State = models.StateDownloaded
-            // progress fields removed
-            _ = a.sessions.UpdateSession(ctx, s)
+            // Verify file still exists and is non-empty before using it
+            if fi, err := os.Stat(src); err == nil && fi.Size() > 0 {
+                s.SourcePath = src
+                s.State = models.StateDownloaded
+                _ = a.sessions.UpdateSession(ctx, s)
+            } else {
+                // Stale mapping: mark expired to trigger fresh download
+                _ = a.sessions.SetAsset(ctx, s.AssetHash, "", "expired")
+            }
         }
     }
-	// Wait until download finishes; if not ready, re-enqueue shortly
-	if s.SourcePath == "" || s.State == models.StateDownloading || s.State == models.StatePreparing || s.State == models.StateCreated {
+    // Validate source exists; if missing or not ready, re-enqueue and ensure download job
+    if s.SourcePath == "" || s.State == models.StateDownloading || s.State == models.StatePreparing || s.State == models.StateCreated {
+        // If no valid source, enqueue a fresh download job
+        if s.SourcePath == "" {
+            _ = a.sessions.SetAsset(ctx, s.AssetHash, "", string(models.StatePreparing))
+            dj := queue.Job{ID: newID(), Type: queue.JobDownload, SessionID: s.ID, EnqueuedAt: time.Now(), Priority: 10}
+            a.dlQueue.Enqueue(dj)
+        }
 		go func(j queue.Job) {
 			// Re-enqueue without mutating the session to avoid overwriting newer fields
 			time.Sleep(5 * time.Second)
@@ -467,6 +548,17 @@ func (a *API) handleConvert(job queue.Job) {
 		}(job)
 		return
 	}
+    // Final guard: ensure source file still exists just before invoking ffmpeg
+    if fi, err := os.Stat(s.SourcePath); err != nil || fi.Size() == 0 {
+        _ = a.sessions.SetAsset(ctx, s.AssetHash, "", "expired")
+        s.SourcePath = ""
+        _ = a.sessions.UpdateSession(ctx, s)
+        go func(j queue.Job) {
+            time.Sleep(2 * time.Second)
+            a.cvQueue.Enqueue(j)
+        }(job)
+        return
+    }
 	s.State = models.StateConverting
 	_ = a.sessions.UpdateSession(ctx, s)
 	if s.AssetHash == "" {
@@ -490,7 +582,12 @@ func (a *API) handleConvert(job queue.Job) {
             }(job)
         } else {
             s.State = models.StateFailed
-            s.Error = err.Error()
+            // Normalize cryptic abort signals into actionable message
+            if strings.Contains(err.Error(), "signal: aborted") {
+                s.Error = "conversion aborted by encoder; source may be stale or environment under load"
+            } else {
+                s.Error = err.Error()
+            }
             _ = a.sessions.UpdateSession(ctx, s)
             a.metrics.ErrorCount.Add(1)
         }
@@ -526,7 +623,7 @@ func (a *API) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]any{
+    resp := map[string]any{
 		"status":         "healthy",
 		"active_jobs":    a.metrics.ActiveJobs.Load(),
 		"queued_jobs":    a.metrics.QueuedJobs.Load(),
@@ -565,8 +662,8 @@ func (a *API) handleMetricsJSON(w http.ResponseWriter, r *http.Request) {
 		"success_rate":     a.metrics.SuccessRate(),
 		"avg_processing_s": 0.0,
 		"sessions_active":  a.metrics.SessionsActive.Load(),
-        "convert_latency_buckets": a.metrics.ConvertLatencyBuckets,
-        "download_latency_buckets": a.metrics.DownloadLatencyBuckets,
+        "convert_latency_buckets": a.snapshotBuckets(a.metrics.ConvertLatencyBuckets[:]),
+        "download_latency_buckets": a.snapshotBuckets(a.metrics.DownloadLatencyBuckets[:]),
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -578,25 +675,18 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// snapshotBuckets converts atomic buckets into a plain slice of int64 for safe JSON marshalling.
+func (a *API) snapshotBuckets(buckets []atomic.Int64) []int64 {
+    out := make([]int64, len(buckets))
+    for i := range buckets {
+        out[i] = buckets[i].Load()
+    }
+    return out
+}
+
 // friendlyStatusText maps internal states to user-friendly dynamic messages.
 func (a *API) friendlyStatusText(s *models.ConversionSession) string {
     switch s.State {
-    case models.StatePreparing, models.StateCreated:
-        return "Analyzing video…"
-    case models.StateDownloading:
-        return "Downloading audio…"
-    case models.StateDownloaded:
-        return "Audio ready. Starting conversion…"
-    case models.StateQueued:
-        if s.ID != "" {
-            pos := a.cvQueue.PositionForSession(queue.JobConvert, s.ID)
-            if pos > 0 {
-                return fmt.Sprintf("Queued for conversion (position %d)…", pos)
-            }
-        }
-        return "Queued for conversion…"
-    case models.StateConverting:
-        return "Converting to MP3…"
     case models.StateCompleted:
         return "Ready to download!"
     case models.StateFailed:
@@ -605,7 +695,7 @@ func (a *API) friendlyStatusText(s *models.ConversionSession) string {
         }
         return "Failed"
     default:
-        return "Working…"
+        return "Preparing your audio…"
     }
 }
 
