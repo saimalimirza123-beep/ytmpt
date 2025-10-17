@@ -364,8 +364,6 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// Prefer stable session-based download URL
 		downloadURL = "/download/" + s.ID + ".mp3"
 	}
-    // Build dynamic flow array reflecting progress
-    flow := a.buildFlow(s)
     // External status: keep simplified unless terminal
     extStatus := string(models.StatePreparing)
     switch s.State {
@@ -376,76 +374,15 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
     default:
         extStatus = string(models.StatePreparing)
     }
-    // Friendly text
-    friendly := a.friendlyStatusText(s)
-    resp := models.StatusResponse{ConversionID: s.ID, Status: extStatus, DownloadURL: downloadURL, StatusText: friendly, Flow: flow}
+    // Dynamic status text based on current stage
+    statusText := a.getDynamicStatusText(s)
+    resp := models.StatusResponse{ConversionID: s.ID, Status: extStatus, DownloadURL: downloadURL, StatusText: statusText}
 	if s.Error != "" {
 		resp.Error = s.Error
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// buildFlow constructs the requested dynamic flow list in order:
-// preparing → fetching_metadata → created → downloading → downloaded → Prossccing → converting → completed → failed
-func (a *API) buildFlow(s *models.ConversionSession) []models.FlowStep {
-    steps := []string{"preparing", "fetching_metadata", "created", "downloading", "downloaded", "Prossccing", "converting", "completed", "failed"}
-    // Determine current index based on internal state mapping
-    currentName := "preparing"
-    switch s.State {
-    case models.StatePreparing:
-        currentName = "preparing"
-    case models.StateFetching:
-        currentName = "fetching_metadata"
-    case models.StateCreated:
-        currentName = "created"
-    case models.StateDownloading:
-        currentName = "downloading"
-    case models.StateDownloaded:
-        // Between downloaded and converting, treat as Prossccing
-        currentName = "Prossccing"
-    case models.StateQueued:
-        // Hide queue by surfacing as Prossccing
-        currentName = "Prossccing"
-    case models.StateConverting:
-        currentName = "converting"
-    case models.StateCompleted:
-        currentName = "completed"
-    case models.StateFailed:
-        currentName = "failed"
-    default:
-        currentName = "preparing"
-    }
-    // Mark done/current flags
-    flow := make([]models.FlowStep, 0, len(steps))
-    reachedCurrent := false
-    for _, name := range steps {
-        step := models.FlowStep{Name: name}
-        if !reachedCurrent {
-            if name == currentName {
-                step.Done = false
-                step.Current = true
-                reachedCurrent = true
-            } else {
-                // mark preceding steps as done
-                step.Done = true
-            }
-        }
-        flow = append(flow, step)
-    }
-    // If terminal, mark all up to and including terminal as done and current=false
-    if currentName == "completed" || currentName == "failed" {
-        for i := range flow {
-            flow[i].Current = false
-            if flow[i].Name == currentName {
-                flow[i].Done = true
-                // steps after terminal remain not done
-                break
-            }
-            flow[i].Done = true
-        }
-    }
-    return flow
-}
 
 func (a *API) handleDelete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -684,18 +621,32 @@ func (a *API) snapshotBuckets(buckets []atomic.Int64) []int64 {
     return out
 }
 
-// friendlyStatusText maps internal states to user-friendly dynamic messages.
-func (a *API) friendlyStatusText(s *models.ConversionSession) string {
+// getDynamicStatusText returns the current stage text based on the conversion state
+func (a *API) getDynamicStatusText(s *models.ConversionSession) string {
     switch s.State {
+    case models.StatePreparing:
+        return "preparing"
+    case models.StateFetching:
+        return "preparing"
+    case models.StateCreated:
+        return "preparing"
+    case models.StateDownloading:
+        return "downloading"
+    case models.StateDownloaded:
+        return "downloaded"
+    case models.StateQueued:
+        return "queuing"
+    case models.StateConverting:
+        return "converting"
     case models.StateCompleted:
-        return "Ready to download!"
+        return "complete"
     case models.StateFailed:
         if s.Error != "" {
             return "Failed: " + s.Error
         }
         return "Failed"
     default:
-        return "Preparing your audio…"
+        return "preparing"
     }
 }
 

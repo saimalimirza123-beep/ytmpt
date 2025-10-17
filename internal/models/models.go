@@ -88,13 +88,5 @@ type StatusResponse struct {
 	QueuePosition      int    `json:"queue_position,omitempty"`
 	Error              string `json:"error,omitempty"`
     StatusText         string `json:"status_text,omitempty"`
-    Flow               []FlowStep `json:"flow,omitempty"`
 }
 
-// FlowStep represents a single step in the user-visible flow.
-// Name follows the external names requested by product/UX.
-type FlowStep struct {
-    Name    string `json:"name"`
-    Done    bool   `json:"done"`
-    Current bool   `json:"current,omitempty"`
-}
