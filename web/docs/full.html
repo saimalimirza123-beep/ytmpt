@@ -134,6 +134,8 @@ MAX_VIDEO_DURATION_SECONDS=2400</pre>
     <li>Dedup prevents duplicate sessions for same URL (memory/Redis).</li>
     <li>Cleanup removes old files after TTLs.</li>
     <li>If conversion queued before download complete, it auto-requeues until ready.</li>
+    <li>No clip-length cap: <code>start_time</code>/<code>end_time</code> are validated for format and within video bounds only.</li>
+    <li>Videos longer than <code>MAX_VIDEO_DURATION_SECONDS</code> are rejected with a clear error like "video too long: max 40m allowed, got 1h12m".</li>
   </ul>
 </body>
 </html>

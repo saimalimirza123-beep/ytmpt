@@ -186,7 +186,9 @@ func (a *API) handlePrepare(w http.ResponseWriter, r *http.Request) {
     // Fetch metadata first to validate duration against configured limit
     title, thumb, dur, _ := a.dl.FetchMetadata(r.Context(), req.URL)
     if a.cfg.MaxVideoDurationSeconds > 0 && dur > a.cfg.MaxVideoDurationSeconds {
-        writeErr(w, http.StatusBadRequest, "video too long")
+        maxStr := humanDuration(a.cfg.MaxVideoDurationSeconds)
+        gotStr := humanDuration(dur)
+        writeErr(w, http.StatusBadRequest, "video too long: max "+maxStr+" allowed, got "+gotStr)
         return
     }
     // Create a new session; dedupe at asset/variant layer instead of reusing sessions
@@ -235,7 +237,9 @@ func (a *API) handleConvertReq(w http.ResponseWriter, r *http.Request) {
     total := s.Meta.Duration
     // Enforce maximum source video duration if configured and known
     if a.cfg.MaxVideoDurationSeconds > 0 && total > a.cfg.MaxVideoDurationSeconds {
-        writeErr(w, http.StatusBadRequest, "video too long")
+        maxStr := humanDuration(a.cfg.MaxVideoDurationSeconds)
+        gotStr := humanDuration(total)
+        writeErr(w, http.StatusBadRequest, "video too long: max "+maxStr+" allowed, got "+gotStr)
         return
     }
     if total < 0 { total = 0 }
@@ -563,6 +567,29 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// humanDuration turns seconds into a compact human-friendly string like "3m45s" or "1h02m".
+func humanDuration(seconds int) string {
+    if seconds <= 0 {
+        return "0s"
+    }
+    h := seconds / 3600
+    m := (seconds % 3600) / 60
+    s := seconds % 60
+    if h > 0 {
+        if s == 0 {
+            return fmt.Sprintf("%dh%02dm", h, m)
+        }
+        return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
+    }
+    if m > 0 {
+        if s == 0 {
+            return fmt.Sprintf("%dm", m)
+        }
+        return fmt.Sprintf("%dm%02ds", m, s)
+    }
+    return fmt.Sprintf("%ds", s)
 }
 
 func safeFilename(s string) string {
