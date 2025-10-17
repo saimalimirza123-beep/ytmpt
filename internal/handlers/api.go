@@ -633,7 +633,7 @@ func (a *API) getDynamicStatusText(s *models.ConversionSession) string {
     case models.StateDownloading:
         return "downloading"
     case models.StateDownloaded:
-        return "downloader"
+        return "downloaded"
     case models.StateQueued:
         return "queuing"
     case models.StateConverting:
