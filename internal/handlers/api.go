@@ -205,11 +205,21 @@ func (a *API) handlePrepare(w http.ResponseWriter, r *http.Request) {
     s.State = models.StateCreated
     _ = a.sessions.UpdateSession(r.Context(), s)
 
-	// enqueue background download
+	// enqueue background download if needed; verify cached asset isn't stale
 	assetHash := util.HashString(util.CanonicalVideoID(req.URL))
 	s.AssetHash = assetHash
 	_ = a.sessions.UpdateSession(r.Context(), s)
-	if _, state, ok, _ := a.sessions.GetAsset(r.Context(), assetHash); !ok || state == "" || state == string(models.StateFailed) {
+	src, state, ok, _ := a.sessions.GetAsset(r.Context(), assetHash)
+	stale := false
+	if ok && src != "" && state == string(models.StateDownloaded) {
+		if fi, err := os.Stat(src); err != nil || fi.Size() == 0 {
+			stale = true
+		}
+	}
+	if !ok || state == "" || state == string(models.StateFailed) || stale {
+		if stale {
+			_ = a.sessions.SetAsset(r.Context(), assetHash, "", "expired")
+		}
 		_ = a.sessions.SetAsset(r.Context(), assetHash, "", string(models.StatePreparing))
 		job := queue.Job{ID: newID(), Type: queue.JobDownload, SessionID: id, EnqueuedAt: time.Now(), Priority: 10}
 		if !a.dlQueue.Enqueue(job) {
@@ -253,26 +263,55 @@ func (a *API) handleConvertReq(w http.ResponseWriter, r *http.Request) {
 	s.AssetHash = util.HashString(util.CanonicalVideoID(s.URL))
 	s.VariantHash = util.HashString(s.AssetHash + "|" + string(req.Quality) + "|" + req.StartTime + "|" + req.EndTime)
 	_ = a.sessions.UpdateSession(r.Context(), s)
-	// Fast-complete if variant already exists
+	// Fast-complete if variant already exists AND file is present
 	if out, ok, _ := a.sessions.GetVariant(r.Context(), s.VariantHash); ok && out != "" {
-		s.OutputPath = out
-		s.State = models.StateCompleted
-		s.DownloadProgress = 100
-		s.ConversionProgress = 100
+		if fi, err := os.Stat(out); err == nil && fi.Size() > 0 {
+			s.OutputPath = out
+			s.State = models.StateCompleted
+			s.DownloadProgress = 100
+			s.ConversionProgress = 100
+			_ = a.sessions.UpdateSession(r.Context(), s)
+			writeJSON(w, http.StatusAccepted, models.ConvertAcceptedResponse{ConversionID: s.ID, Status: string(s.State), QueuePosition: 0, Message: "Reused existing converted output."})
+			return
+		}
+		// stale mapping: clear and proceed to enqueue conversion
+		_ = a.sessions.SetVariant(r.Context(), s.VariantHash, "")
+		s.OutputPath = ""
 		_ = a.sessions.UpdateSession(r.Context(), s)
-		writeJSON(w, http.StatusAccepted, models.ConvertAcceptedResponse{ConversionID: s.ID, Status: string(s.State), QueuePosition: 0, Message: "Reused existing converted output."})
-		return
 	}
-    // Determine if source is already ready to avoid unnecessary 'queued' bounce
-    sourceReady := false
-    if s.SourcePath != "" {
-        sourceReady = true
-    } else {
-        if src, state, ok, _ := a.sessions.GetAsset(r.Context(), s.AssetHash); ok && src != "" && state == string(models.StateDownloaded) {
-            s.SourcePath = src
-            sourceReady = true
-        }
-    }
+	// Determine if source is already ready to avoid unnecessary 'queued' bounce
+	sourceReady := false
+	if s.SourcePath != "" {
+		if fi, err := os.Stat(s.SourcePath); err == nil && fi.Size() > 0 {
+			sourceReady = true
+		} else {
+			// recorded path missing; mark asset stale
+			_ = a.sessions.SetAsset(r.Context(), s.AssetHash, "", "expired")
+			s.SourcePath = ""
+		}
+	}
+	if !sourceReady {
+		if src2, state2, ok2, _ := a.sessions.GetAsset(r.Context(), s.AssetHash); ok2 && src2 != "" && state2 == string(models.StateDownloaded) {
+			if fi, err := os.Stat(src2); err == nil && fi.Size() > 0 {
+				s.SourcePath = src2
+				sourceReady = true
+			} else {
+				_ = a.sessions.SetAsset(r.Context(), s.AssetHash, "", "expired")
+			}
+		}
+	}
+	// If source not ready, ensure a fresh download job is enqueued
+	if !sourceReady {
+		_, astate, ok3, _ := a.sessions.GetAsset(r.Context(), s.AssetHash)
+		if !ok3 || astate == "" || astate == string(models.StateFailed) || astate == "expired" {
+			_ = a.sessions.SetAsset(r.Context(), s.AssetHash, "", string(models.StatePreparing))
+			job := queue.Job{ID: newID(), Type: queue.JobDownload, SessionID: s.ID, EnqueuedAt: time.Now(), Priority: 10}
+			if !a.dlQueue.Enqueue(job) {
+				writeErr(w, http.StatusServiceUnavailable, "queue full")
+				return
+			}
+		}
+	}
 
     // Map API key to job priority (simple heuristic: premium > default)
 	apiKey := r.Header.Get("X-API-Key")
@@ -318,6 +357,15 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
+    // If session points to an output that has expired, reflect accurate status
+    if s.State == models.StateCompleted && s.OutputPath != "" {
+        if fi, err := os.Stat(s.OutputPath); err != nil || fi.Size() == 0 {
+            s.OutputPath = ""
+            s.State = models.StateFailed
+            s.Error = "output expired; please request conversion again"
+            _ = a.sessions.UpdateSession(r.Context(), s)
+        }
+    }
 	downloadURL := ""
 	if s.State == models.StateCompleted && s.OutputPath != "" {
 		// Prefer stable session-based download URL
