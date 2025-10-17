@@ -658,7 +658,7 @@
                         const data = await response.json();
 
                         if (response.ok) {
-                            this.updateStatus(data.status);
+                            this.updateStatus(data.status_text || data.status);
                             // No percentage progress; rely on status only
 
                             if (data.status === 'completed' && data.download_url) {

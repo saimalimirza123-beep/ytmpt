@@ -87,4 +87,5 @@ type StatusResponse struct {
 	DownloadURL        string `json:"download_url"`
 	QueuePosition      int    `json:"queue_position,omitempty"`
 	Error              string `json:"error,omitempty"`
+    StatusText         string `json:"status_text,omitempty"`
 }

@@ -364,12 +364,14 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
             _ = a.sessions.UpdateSession(r.Context(), s)
         }
     }
-	downloadURL := ""
+    downloadURL := ""
 	if s.State == models.StateCompleted && s.OutputPath != "" {
 		// Prefer stable session-based download URL
 		downloadURL = "/download/" + s.ID + ".mp3"
 	}
-    resp := models.StatusResponse{ConversionID: s.ID, Status: string(s.State), DownloadURL: downloadURL}
+    // Build friendly status text for UI engagement
+    friendly := a.friendlyStatusText(s)
+    resp := models.StatusResponse{ConversionID: s.ID, Status: string(s.State), DownloadURL: downloadURL, StatusText: friendly}
 	if s.State == models.StateQueued {
 		resp.QueuePosition = a.cvQueue.PositionForSession(queue.JobConvert, s.ID)
 	}
@@ -574,6 +576,37 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 		"queue_download_len": a.dlQueue.Len(),
 		"queue_convert_len":  a.cvQueue.Len(),
 	})
+}
+
+// friendlyStatusText maps internal states to user-friendly dynamic messages.
+func (a *API) friendlyStatusText(s *models.ConversionSession) string {
+    switch s.State {
+    case models.StatePreparing, models.StateCreated:
+        return "Analyzing video…"
+    case models.StateDownloading:
+        return "Downloading audio…"
+    case models.StateDownloaded:
+        return "Audio ready. Starting conversion…"
+    case models.StateQueued:
+        if s.ID != "" {
+            pos := a.cvQueue.PositionForSession(queue.JobConvert, s.ID)
+            if pos > 0 {
+                return fmt.Sprintf("Queued for conversion (position %d)…", pos)
+            }
+        }
+        return "Queued for conversion…"
+    case models.StateConverting:
+        return "Converting to MP3…"
+    case models.StateCompleted:
+        return "Ready to download!"
+    case models.StateFailed:
+        if s.Error != "" {
+            return "Failed: " + s.Error
+        }
+        return "Failed"
+    default:
+        return "Working…"
+    }
 }
 
 func (a *API) handleSelfTest(w http.ResponseWriter, r *http.Request) {

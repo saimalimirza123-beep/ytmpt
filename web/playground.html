@@ -319,7 +319,11 @@
     async function uiStatus(conversionId, target='resp') {
       const res = await request('GET', '/status/' + encodeURIComponent(conversionId));
       if (res.ok) {
-        if (res.json.status) el('statusText').textContent = res.json.status;
+        if (res.json.status_text) {
+          el('statusText').textContent = res.json.status_text;
+        } else if (res.json.status) {
+          el('statusText').textContent = res.json.status;
+        }
         if (res.json.download_url) setDownloadLink(res.json.download_url);
       }
       show(res.json, target);
