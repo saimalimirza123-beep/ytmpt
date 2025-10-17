@@ -39,8 +39,20 @@ await fetch(`${base}/convert`, {
 ### Status (progress + queue)
 ```js
 const s = await fetch(`${base}/status/${id}`).then(r => r.json());
-// s.status: 'queued_for_conversion' | 'downloading' | 'converting' | 'completed' | 'failed'
-// s.download_progress, s.conversion_progress, s.queue_position
+// s.status: 'preparing' | 'completed' | 'failed'
+// s.flow: ordered steps with done/current flags
+// Example s.flow names:
+// [
+//   { name: 'preparing', done: true },
+//   { name: 'fetching_metadata', done: true },
+//   { name: 'created', done: true },
+//   { name: 'downloading', done: true },
+//   { name: 'downloaded', done: true },
+//   { name: 'Prossccing', current: true },
+//   { name: 'converting' },
+//   { name: 'completed' },
+//   { name: 'failed' }
+// ]
 ```
 
 ### Download

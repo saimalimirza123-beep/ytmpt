@@ -363,7 +363,9 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// Prefer stable session-based download URL
 		downloadURL = "/download/" + s.ID + ".mp3"
 	}
-    // Map internal states to simplified external states
+    // Build dynamic flow array reflecting progress
+    flow := a.buildFlow(s)
+    // External status: keep simplified unless terminal
     extStatus := string(models.StatePreparing)
     switch s.State {
     case models.StateCompleted:
@@ -371,15 +373,77 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
     case models.StateFailed:
         extStatus = string(models.StateFailed)
     default:
-        // keep as 'preparing' for all non-terminal states
+        extStatus = string(models.StatePreparing)
     }
-    // Build friendly status text for UI; avoid queue/converting wording
+    // Friendly text
     friendly := a.friendlyStatusText(s)
-    resp := models.StatusResponse{ConversionID: s.ID, Status: extStatus, DownloadURL: downloadURL, StatusText: friendly}
+    resp := models.StatusResponse{ConversionID: s.ID, Status: extStatus, DownloadURL: downloadURL, StatusText: friendly, Flow: flow}
 	if s.Error != "" {
 		resp.Error = s.Error
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// buildFlow constructs the requested dynamic flow list in order:
+// preparing → fetching_metadata → created → downloading → downloaded → Prossccing → converting → completed → failed
+func (a *API) buildFlow(s *models.ConversionSession) []models.FlowStep {
+    steps := []string{"preparing", "fetching_metadata", "created", "downloading", "downloaded", "Prossccing", "converting", "completed", "failed"}
+    // Determine current index based on internal state mapping
+    currentName := "preparing"
+    switch s.State {
+    case models.StatePreparing:
+        currentName = "preparing"
+    case models.StateFetching:
+        currentName = "fetching_metadata"
+    case models.StateCreated:
+        currentName = "created"
+    case models.StateDownloading:
+        currentName = "downloading"
+    case models.StateDownloaded:
+        // Between downloaded and converting, treat as Prossccing
+        currentName = "Prossccing"
+    case models.StateQueued:
+        // Hide queue by surfacing as Prossccing
+        currentName = "Prossccing"
+    case models.StateConverting:
+        currentName = "converting"
+    case models.StateCompleted:
+        currentName = "completed"
+    case models.StateFailed:
+        currentName = "failed"
+    default:
+        currentName = "preparing"
+    }
+    // Mark done/current flags
+    flow := make([]models.FlowStep, 0, len(steps))
+    reachedCurrent := false
+    for _, name := range steps {
+        step := models.FlowStep{Name: name}
+        if !reachedCurrent {
+            if name == currentName {
+                step.Done = false
+                step.Current = true
+                reachedCurrent = true
+            } else {
+                // mark preceding steps as done
+                step.Done = true
+            }
+        }
+        flow = append(flow, step)
+    }
+    // If terminal, mark all up to and including terminal as done and current=false
+    if currentName == "completed" || currentName == "failed" {
+        for i := range flow {
+            flow[i].Current = false
+            if flow[i].Name == currentName {
+                flow[i].Done = true
+                // steps after terminal remain not done
+                break
+            }
+            flow[i].Done = true
+        }
+    }
+    return flow
 }
 
 func (a *API) handleDelete(w http.ResponseWriter, r *http.Request) {
