@@ -9,6 +9,10 @@ This API converts YouTube to MP3 using a two-step, asynchronous flow.
 4. Poll GET /status/{conversion_id} every 2–5s.
 5. When `status=completed`, use `download_url` to download.
 
+Note: The status endpoint intentionally reports a simplified flow to improve UX:
+- While work is ongoing (preparing/downloading/queued/converting), clients will see `status="preparing"` with a friendly `status_text` like "Preparing your audio…".
+- Only terminal states surface as-is: `completed` or `failed`.
+
 ## Example calls
 
 ### Prepare

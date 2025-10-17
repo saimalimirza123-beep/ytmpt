@@ -77,7 +77,7 @@ type ConvertResponse struct {
 type ConvertAcceptedResponse struct {
 	ConversionID  string `json:"conversion_id"`
 	Status        string `json:"status"`
-	QueuePosition int    `json:"queue_position"`
+    QueuePosition int    `json:"queue_position,omitempty"`
 	Message       string `json:"message"`
 }
 

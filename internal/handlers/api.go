@@ -330,22 +330,16 @@ func (a *API) handleConvertReq(w http.ResponseWriter, r *http.Request) {
         s.State = models.StateQueued
     }
     _ = a.sessions.UpdateSession(r.Context(), s)
-	// Report position in the convert queue and current download state
-	position := a.cvQueue.PositionForSession(queue.JobConvert, s.ID)
-    msg := "Conversion request accepted."
-    if sourceReady {
-        msg += " Starting conversion shortly."
-    } else {
-        msg += " Waiting for download to finish."
-    }
-    // Report more accurate status in response to reduce UI flicker
-    respStatus := string(s.State)
+    // Externalize as 'preparing' to avoid exposing queue/converting states
+    respStatus := string(models.StatePreparing)
+    msg := "Request accepted. Preparing your audio…"
+    // Hide queue position entirely by omitting (omitempty with zero)
     writeJSON(w, http.StatusAccepted, models.ConvertAcceptedResponse{
-		ConversionID:  s.ID,
+        ConversionID:  s.ID,
         Status:        respStatus,
-		QueuePosition: position,
-		Message:       msg,
-	})
+        QueuePosition: 0,
+        Message:       msg,
+    })
 }
 
 func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -369,12 +363,19 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// Prefer stable session-based download URL
 		downloadURL = "/download/" + s.ID + ".mp3"
 	}
-    // Build friendly status text for UI engagement
+    // Map internal states to simplified external states
+    extStatus := string(models.StatePreparing)
+    switch s.State {
+    case models.StateCompleted:
+        extStatus = string(models.StateCompleted)
+    case models.StateFailed:
+        extStatus = string(models.StateFailed)
+    default:
+        // keep as 'preparing' for all non-terminal states
+    }
+    // Build friendly status text for UI; avoid queue/converting wording
     friendly := a.friendlyStatusText(s)
-    resp := models.StatusResponse{ConversionID: s.ID, Status: string(s.State), DownloadURL: downloadURL, StatusText: friendly}
-	if s.State == models.StateQueued {
-		resp.QueuePosition = a.cvQueue.PositionForSession(queue.JobConvert, s.ID)
-	}
+    resp := models.StatusResponse{ConversionID: s.ID, Status: extStatus, DownloadURL: downloadURL, StatusText: friendly}
 	if s.Error != "" {
 		resp.Error = s.Error
 	}
@@ -581,22 +582,6 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 // friendlyStatusText maps internal states to user-friendly dynamic messages.
 func (a *API) friendlyStatusText(s *models.ConversionSession) string {
     switch s.State {
-    case models.StatePreparing, models.StateCreated:
-        return "Analyzing video…"
-    case models.StateDownloading:
-        return "Downloading audio…"
-    case models.StateDownloaded:
-        return "Audio ready. Starting conversion…"
-    case models.StateQueued:
-        if s.ID != "" {
-            pos := a.cvQueue.PositionForSession(queue.JobConvert, s.ID)
-            if pos > 0 {
-                return fmt.Sprintf("Queued for conversion (position %d)…", pos)
-            }
-        }
-        return "Queued for conversion…"
-    case models.StateConverting:
-        return "Converting to MP3…"
     case models.StateCompleted:
         return "Ready to download!"
     case models.StateFailed:
@@ -605,7 +590,7 @@ func (a *API) friendlyStatusText(s *models.ConversionSession) string {
         }
         return "Failed"
     default:
-        return "Working…"
+        return "Preparing your audio…"
     }
 }
 
