@@ -79,12 +79,8 @@
 
       <div class="row">
         <div>
-          <label>Download Progress</label>
-          <div class="progress"><div id="dlBar" class="bar"></div></div>
-        </div>
-        <div>
-          <label>Conversion Progress</label>
-          <div class="progress"><div id="cvBar" class="bar"></div></div>
+          <label>Status</label>
+          <div id="statusText" class="muted">-</div>
         </div>
       </div>
 
@@ -323,8 +319,7 @@
     async function uiStatus(conversionId, target='resp') {
       const res = await request('GET', '/status/' + encodeURIComponent(conversionId));
       if (res.ok) {
-        setBar('dlBar', res.json.download_progress);
-        setBar('cvBar', res.json.conversion_progress);
+        if (res.json.status) el('statusText').textContent = res.json.status;
         if (res.json.download_url) setDownloadLink(res.json.download_url);
       }
       show(res.json, target);
@@ -381,7 +376,7 @@
     el('btnStart').addEventListener('click', async () => {
       const url = el('url').value.trim();
       if (!url) { alert('Enter a YouTube video URL'); return; }
-      el('download').style.display = 'none'; setBar('dlBar', 0); setBar('cvBar', 0);
+      el('download').style.display = 'none'; el('statusText').textContent = '-';
       const prep = await uiPrepare(url);
       if (prep.ok && prep.json.conversion_id) {
         const cid = prep.json.conversion_id;

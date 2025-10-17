@@ -268,8 +268,7 @@ func (a *API) handleConvertReq(w http.ResponseWriter, r *http.Request) {
 		if fi, err := os.Stat(out); err == nil && fi.Size() > 0 {
 			s.OutputPath = out
 			s.State = models.StateCompleted
-			s.DownloadProgress = 100
-			s.ConversionProgress = 100
+            // progress fields removed
 			_ = a.sessions.UpdateSession(r.Context(), s)
 			writeJSON(w, http.StatusAccepted, models.ConvertAcceptedResponse{ConversionID: s.ID, Status: string(s.State), QueuePosition: 0, Message: "Reused existing converted output."})
 			return
@@ -281,15 +280,14 @@ func (a *API) handleConvertReq(w http.ResponseWriter, r *http.Request) {
 	}
 	// Determine if source is already ready to avoid unnecessary 'queued' bounce
 	sourceReady := false
-	if s.SourcePath != "" {
-		if fi, err := os.Stat(s.SourcePath); err == nil && fi.Size() > 0 {
-			sourceReady = true
-		} else {
-			// recorded path missing; mark asset stale
-			_ = a.sessions.SetAsset(r.Context(), s.AssetHash, "", "expired")
-			s.SourcePath = ""
-		}
-	}
+    if s.SourcePath != "" {
+        if fi, err := os.Stat(s.SourcePath); err == nil && fi.Size() > 0 {
+            sourceReady = true
+        } else {
+            _ = a.sessions.SetAsset(r.Context(), s.AssetHash, "", "expired")
+            s.SourcePath = ""
+        }
+    }
 	if !sourceReady {
 		if src2, state2, ok2, _ := a.sessions.GetAsset(r.Context(), s.AssetHash); ok2 && src2 != "" && state2 == string(models.StateDownloaded) {
 			if fi, err := os.Stat(src2); err == nil && fi.Size() > 0 {
@@ -371,7 +369,7 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// Prefer stable session-based download URL
 		downloadURL = "/download/" + s.ID + ".mp3"
 	}
-	resp := models.StatusResponse{ConversionID: s.ID, Status: string(s.State), DownloadProgress: s.DownloadProgress, ConversionProgress: s.ConversionProgress, DownloadURL: downloadURL}
+    resp := models.StatusResponse{ConversionID: s.ID, Status: string(s.State), DownloadURL: downloadURL}
 	if s.State == models.StateQueued {
 		resp.QueuePosition = a.cvQueue.PositionForSession(queue.JobConvert, s.ID)
 	}
@@ -410,10 +408,7 @@ func (a *API) handleDownload(job queue.Job) {
 		s.AssetHash = util.HashString(util.CanonicalVideoID(s.URL))
 	}
 	out := filepath.Join(a.cfg.ConversionsDir, "streams", s.AssetHash+".source")
-	err = a.dl.Download(ctx, s.URL, out, func(p int) {
-		s.DownloadProgress = p
-		_ = a.sessions.UpdateSession(ctx, s)
-	})
+    err = a.dl.Download(ctx, s.URL, out, func(p int) {})
     if err != nil {
         job.Attempts++
         if job.Attempts < a.cfg.MaxJobRetries {
@@ -435,8 +430,7 @@ func (a *API) handleDownload(job queue.Job) {
     a.metrics.SuccessCount.Add(1)
     a.metrics.ObserveDuration(time.Since(start).Seconds(), false)
 	s.SourcePath = out
-	s.State = models.StateDownloaded
-	s.DownloadProgress = 100
+    s.State = models.StateDownloaded
 	_ = a.sessions.UpdateSession(ctx, s)
 	_ = a.sessions.SetAsset(ctx, s.AssetHash, out, string(models.StateDownloaded))
 }
@@ -458,7 +452,7 @@ func (a *API) handleConvert(job queue.Job) {
         if src, state, ok, _ := a.sessions.GetAsset(ctx, s.AssetHash); ok && src != "" && state == string(models.StateDownloaded) {
             s.SourcePath = src
             s.State = models.StateDownloaded
-            s.DownloadProgress = 100
+            // progress fields removed
             _ = a.sessions.UpdateSession(ctx, s)
         }
     }
@@ -481,10 +475,7 @@ func (a *API) handleConvert(job queue.Job) {
 	}
 	out := filepath.Join(a.cfg.ConversionsDir, "outputs", s.VariantHash+".mp3")
 	dur := s.Meta.Duration
-    err = a.conv.Convert(ctx, s.SourcePath, out, job.Quality, job.StartTime, job.EndTime, dur, func(p int) {
-		s.ConversionProgress = p
-		_ = a.sessions.UpdateSession(ctx, s)
-	})
+    err = a.conv.Convert(ctx, s.SourcePath, out, job.Quality, job.StartTime, job.EndTime, dur, func(p int) {})
 	if err != nil {
         job.Attempts++
         if job.Attempts < a.cfg.MaxJobRetries {
@@ -505,9 +496,8 @@ func (a *API) handleConvert(job queue.Job) {
 	}
     a.metrics.SuccessCount.Add(1)
     a.metrics.ObserveDuration(time.Since(start).Seconds(), true)
-	s.OutputPath = out
-	s.ConversionProgress = 100
-	s.State = models.StateCompleted
+    s.OutputPath = out
+    s.State = models.StateCompleted
 	_ = a.sessions.UpdateSession(ctx, s)
 	_ = a.sessions.SetVariant(ctx, s.VariantHash, out)
 }

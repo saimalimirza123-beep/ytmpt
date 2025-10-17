@@ -405,25 +405,23 @@
                 </button>
             </div>
 
-            <!-- Progress Section -->
-            <div class="progress-section">
-                <div class="progress-item">
-                    <div class="progress-label">
-                        <span>📥 Download Progress</span>
-                        <span id="downloadPercent">0%</span>
-                    </div>
-                    <div class="progress-bar">
-                        <div id="downloadProgress" class="progress-fill" style="width: 0%"></div>
-                    </div>
+            <!-- Simple Status Section (no percentages) -->
+            <div class="status-section">
+                <div class="status-item">
+                    <span class="status-label">Status:</span>
+                    <span id="currentStatus" class="status-value">Ready</span>
                 </div>
-                <div class="progress-item">
-                    <div class="progress-label">
-                        <span>🔄 Conversion Progress</span>
-                        <span id="convertPercent">0%</span>
-                    </div>
-                    <div class="progress-bar">
-                        <div id="convertProgress" class="progress-fill" style="width: 0%"></div>
-                    </div>
+                <div class="status-item">
+                    <span class="status-label">Conversion ID:</span>
+                    <span id="conversionId" class="conversion-id">Not started</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Video Title:</span>
+                    <span id="videoTitle" class="status-value">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Duration:</span>
+                    <span id="videoDuration" class="status-value">-</span>
                 </div>
             </div>
 
@@ -661,8 +659,7 @@
 
                         if (response.ok) {
                             this.updateStatus(data.status);
-                            this.updateProgress('download', data.download_progress);
-                            this.updateProgress('convert', data.conversion_progress);
+                            // No percentage progress; rely on status only
 
                             if (data.status === 'completed' && data.download_url) {
                                 this.showDownloadButton(data.download_url);
@@ -692,8 +689,6 @@
                 this.conversionId = null;
                 document.getElementById('convertBtn').disabled = true;
                 document.getElementById('downloadSection').style.display = 'none';
-                this.updateProgress('download', 0);
-                this.updateProgress('convert', 0);
                 this.updateStatus('Ready');
                 document.getElementById('conversionId').textContent = 'Not started';
                 document.getElementById('videoTitle').textContent = '-';

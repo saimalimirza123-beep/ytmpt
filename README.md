@@ -7,7 +7,7 @@ YouTube → MP3 conversion API with async jobs, audio-only downloads, and queue-
 - Background audio-only download (best available stream)
 - Asynchronous conversion (POST /convert returns 202 with queue_position)
 - Duplicate-friendly: single download per URL (asset hash); conversion dedup per variant (url+quality+trim)
-- Status with progress, queue position, and download URL
+- Lightweight status (no percentages), queue position, and download URL
 - Rate limiting (global + per-IP), optional API keys and priority queues
 - Redis-backed sessions (docker-compose provided)
 
@@ -106,8 +106,6 @@ Response (fast-complete if variant exists):
 {
   "conversion_id": "conv_...",
   "status": "completed|preparing|downloading|converting|failed|queued_for_conversion",
-  "download_progress": 85,
-  "conversion_progress": 100,
   "download_url": "/download/conv_....mp3",
   "queue_position": 0
 }

@@ -41,8 +41,7 @@ type ConversionSession struct {
 	CreatedAt          time.Time         `json:"created_at"`
 	UpdatedAt          time.Time         `json:"updated_at"`
 	SourcePath         string            `json:"source_path"`
-	DownloadProgress   int               `json:"download_progress"`
-	ConversionProgress int               `json:"conversion_progress"`
+    // Progress fields removed in favor of lightweight status polling
 	OutputPath         string            `json:"output_path"`
 	Quality            ConversionQuality `json:"quality"`
 	Error              string            `json:"error"`
@@ -85,8 +84,6 @@ type ConvertAcceptedResponse struct {
 type StatusResponse struct {
 	ConversionID       string `json:"conversion_id"`
 	Status             string `json:"status"`
-	DownloadProgress   int    `json:"download_progress"`
-	ConversionProgress int    `json:"conversion_progress"`
 	DownloadURL        string `json:"download_url"`
 	QueuePosition      int    `json:"queue_position,omitempty"`
 	Error              string `json:"error,omitempty"`

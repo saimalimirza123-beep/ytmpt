@@ -51,12 +51,10 @@
   }</pre>
 
   <h3>GET /status/{conversion_id}</h3>
-  <p>Poll to track download and conversion progress.</p>
+  <p>Poll to track dynamic status (no percentages).</p>
   <pre>{
   "conversion_id": "conv_12345",
-  "status": "completed|preparing|downloading|converting|failed|queued_for_conversion",
-  "download_progress": 85,
-  "conversion_progress": 100,
+  "status": "preparing|downloading|converting|completed|failed|queued_for_conversion",
   "download_url": "/download/conv_12345.mp3",
   "queue_position": 2,
   "error": ""
