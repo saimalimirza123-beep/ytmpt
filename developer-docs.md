@@ -67,4 +67,5 @@ if (s.status === 'completed' && s.download_url) {
 ## Notes
 - Conversion qualities: 128/192/256/320 (CBR) by default.
 - Time range: set `start_time` and/or `end_time` as `HH:MM:SS`.
+- Videos longer than the configured `MAX_VIDEO_DURATION_SECONDS` (default 2400s = 40m) are rejected.
 - Identical requests may complete instantly if the variant was previously converted.

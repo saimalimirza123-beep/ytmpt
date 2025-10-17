@@ -183,20 +183,25 @@ func (a *API) handlePrepare(w http.ResponseWriter, r *http.Request) {
         writeErr(w, http.StatusBadRequest, "unsupported url domain")
         return
     }
-	// Always create a new session; dedupe at asset/variant layer instead of reusing sessions
-	id := newID()
-	s := &models.ConversionSession{ID: id, URL: req.URL, State: models.StatePreparing}
-	if err := a.sessions.CreateSession(r.Context(), s); err != nil {
-		writeErr(w, http.StatusInternalServerError, "failed to create session")
-		return
-	}
-	_ = a.sessions.SetURLMap(r.Context(), req.URL, id)
+    // Fetch metadata first to validate duration against configured limit
+    title, thumb, dur, _ := a.dl.FetchMetadata(r.Context(), req.URL)
+    if a.cfg.MaxVideoDurationSeconds > 0 && dur > a.cfg.MaxVideoDurationSeconds {
+        writeErr(w, http.StatusBadRequest, "video too long")
+        return
+    }
+    // Create a new session; dedupe at asset/variant layer instead of reusing sessions
+    id := newID()
+    s := &models.ConversionSession{ID: id, URL: req.URL, State: models.StatePreparing}
+    if err := a.sessions.CreateSession(r.Context(), s); err != nil {
+        writeErr(w, http.StatusInternalServerError, "failed to create session")
+        return
+    }
+    _ = a.sessions.SetURLMap(r.Context(), req.URL, id)
 
-	// fetch metadata fast using yt-dlp --dump-json (fallback design)
-	title, thumb, dur, _ := a.dl.FetchMetadata(r.Context(), req.URL)
-	s.Meta = models.MetaLite{Title: title, Thumbnail: thumb, Duration: dur}
-	s.State = models.StateCreated
-	_ = a.sessions.UpdateSession(r.Context(), s)
+    // Populate metadata and mark session as created
+    s.Meta = models.MetaLite{Title: title, Thumbnail: thumb, Duration: dur}
+    s.State = models.StateCreated
+    _ = a.sessions.UpdateSession(r.Context(), s)
 
 	// enqueue background download
 	assetHash := util.HashString(util.CanonicalVideoID(req.URL))
@@ -225,12 +230,17 @@ func (a *API) handleConvertReq(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "session not found")
 		return
 	}
-    // Validation: sanity check start/end and max clip length
+    // Validation: sanity check start/end against total duration; no clip-length cap
     // Try using known video duration from metadata if present
     total := s.Meta.Duration
+    // Enforce maximum source video duration if configured and known
+    if a.cfg.MaxVideoDurationSeconds > 0 && total > a.cfg.MaxVideoDurationSeconds {
+        writeErr(w, http.StatusBadRequest, "video too long")
+        return
+    }
     if total < 0 { total = 0 }
-    if _, _, ok := util.ParseClipBounds(req.StartTime, req.EndTime, a.cfg.MaxClipSeconds, total); !ok {
-        writeErr(w, http.StatusBadRequest, "invalid start/end or clip too long")
+    if _, _, ok := util.ParseClipBounds(req.StartTime, req.EndTime, 0, total); !ok {
+        writeErr(w, http.StatusBadRequest, "invalid start/end")
         return
     }
 	// Always accept and enqueue conversion asynchronously. If source not ready,

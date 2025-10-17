@@ -65,7 +65,7 @@ Environment variables configure performance, security, and behavior. Defaults ar
 - DURATION_API_ENDPOINT (https://ds2.ezsrv.net/api/getDuration): Used for fast duration.
 
 - ALLOWED_DOMAINS (youtube.com,youtu.be): Only accept URLs from these hosts.
-- MAX_CLIP_SECONDS (900): Reject clips longer than this (based on start/end/duration).
+- MAX_VIDEO_DURATION_SECONDS (2400): Reject videos longer than this (seconds; default 40m).
 - IP_ALLOWLIST (""): Optional comma-separated client IPs to allow; empty = allow all.
 - SHED_QUEUE_THRESHOLD (0): If total queued jobs exceed this, readiness returns 503 to shed load.
 
