@@ -5,6 +5,7 @@ import "time"
 type ConversionQuality string
 
 const (
+    Quality64 ConversionQuality = "64"
 	Quality128 ConversionQuality = "128"
 	Quality192 ConversionQuality = "192"
 	Quality256 ConversionQuality = "256"
