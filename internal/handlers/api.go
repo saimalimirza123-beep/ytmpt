@@ -26,6 +26,7 @@ import (
 	"ytmp3api/internal/store"
 	"ytmp3api/internal/util"
     "os/exec"
+    "sync/atomic"
 )
 
 type API struct {
@@ -622,7 +623,7 @@ func (a *API) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleHealth(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]any{
+    resp := map[string]any{
 		"status":         "healthy",
 		"active_jobs":    a.metrics.ActiveJobs.Load(),
 		"queued_jobs":    a.metrics.QueuedJobs.Load(),
@@ -661,8 +662,8 @@ func (a *API) handleMetricsJSON(w http.ResponseWriter, r *http.Request) {
 		"success_rate":     a.metrics.SuccessRate(),
 		"avg_processing_s": 0.0,
 		"sessions_active":  a.metrics.SessionsActive.Load(),
-        "convert_latency_buckets": a.metrics.ConvertLatencyBuckets,
-        "download_latency_buckets": a.metrics.DownloadLatencyBuckets,
+        "convert_latency_buckets": a.snapshotBuckets(a.metrics.ConvertLatencyBuckets[:]),
+        "download_latency_buckets": a.snapshotBuckets(a.metrics.DownloadLatencyBuckets[:]),
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -672,6 +673,15 @@ func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
 		"queue_download_len": a.dlQueue.Len(),
 		"queue_convert_len":  a.cvQueue.Len(),
 	})
+}
+
+// snapshotBuckets converts atomic buckets into a plain slice of int64 for safe JSON marshalling.
+func (a *API) snapshotBuckets(buckets []atomic.Int64) []int64 {
+    out := make([]int64, len(buckets))
+    for i := range buckets {
+        out[i] = buckets[i].Load()
+    }
+    return out
 }
 
 // friendlyStatusText maps internal states to user-friendly dynamic messages.
